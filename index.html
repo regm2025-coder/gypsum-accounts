@@ -103,6 +103,18 @@
     @page{size:A4;margin:12mm}
   }
 </style>
+<link rel="manifest" href="./manifest.json">
+<link rel="apple-touch-icon" href="./apple-touch-icon.png">
+<link rel="apple-touch-startup-image" href="./screenshots/home.png">
+<link rel="icon" type="image/png" sizes="32x32" href="./favicon-32.png">
+<link rel="icon" type="image/png" sizes="192x192" href="./icon-192.png">
+<link rel="icon" type="image/svg+xml" href="./icon.svg">
+<meta name="theme-color" content="#1E293B">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="حسابات الجبس">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="description" content="حسابات معلم الجبس والديكور: المشاريع والدفقات والمصروفات وكشوف الحساب — يعمل بدون إنترنت.">
 </head>
 <body>
 <div id="app"></div>
@@ -1104,6 +1116,34 @@
   });
 
   render();
+})();
+</script>
+<script>
+/* ─── PWA: تفعيل العمل بدون إنترنت ─── */
+(function () {
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', function () {
+      navigator.serviceWorker.register('./sw.js', { scope: './' }).then(function (reg) {
+        reg.addEventListener('updatefound', function () {});
+      }).catch(function () {});
+    });
+  }
+  // رسالة صغيرة عند أول زيارة لتوضيح التثبيت
+  try {
+    var KEY = 'gypsum_install_hint_v1';
+    if (!localStorage.getItem(KEY)) {
+      localStorage.setItem(KEY, '1');
+      setTimeout(function () {
+        if (window.matchMedia('(display-mode: standalone)').matches) return;
+        var bar = document.createElement('div');
+        bar.setAttribute('dir', 'rtl');
+        bar.style.cssText = 'position:fixed;left:12px;right:12px;bottom:16px;z-index:9999;background:#1E293B;color:#fff;border-radius:16px;padding:12px 14px;box-shadow:0 12px 30px rgba(15,23,42,.4);font-family:Cairo,Tahoma,sans-serif;font-size:12px;font-weight:800;display:flex;align-items:center;gap:10px';
+        bar.innerHTML = '<span style="font-size:18px">📲</span><span style="flex:1;line-height:1.6">ثبّت التطبيق على شاشتك الرئيسية: قائمة المتصفح ⋮ ← «تثبيت التطبيق»</span><button style="background:#D97706;border:0;color:#fff;border-radius:10px;padding:7px 10px;font-family:inherit;font-weight:900;font-size:11px">حسناً</button>';
+        bar.querySelector('button').onclick = function () { bar.remove(); };
+        document.body.appendChild(bar);
+      }, 1800);
+    }
+  } catch (e) {}
 })();
 </script>
 </body>
