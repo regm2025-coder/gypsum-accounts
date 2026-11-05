@@ -211,6 +211,39 @@
       exps: exps.slice().sort(function (a, b) { return new Date(b.spentAt) - new Date(a.spentAt); })
     };
   }
+  function pad4(n) { return String(n).padStart(4, "0"); }
+
+  /** اشتقاق السندات: كل دفعة = سند قبض، كل فاتورة/أجرة = سند صرف */
+  function buildVouchers(pid) {
+    var pays = db.payments
+      .filter(function (x) { return x.projectId === pid; })
+      .sort(function (a, b) { return new Date(a.paidAt) - new Date(b.paidAt); });
+    var exps = db.expenses
+      .filter(function (x) { return x.projectId === pid; })
+      .sort(function (a, b) { return new Date(a.spentAt) - new Date(b.spentAt); });
+    var out = [];
+    pays.forEach(function (x, i) {
+      out.push({
+        kind: "receipt", number: "ق-" + pad4(i + 1), amount: Number(x.amount) || 0,
+        date: x.paidAt, party: "صاحب البيت",
+        description: x.note || "دفعة مقبوضة من صاحب البيت",
+        method: x.method, image: x.image, refId: x.id, category: "دفعة مقبوضة"
+      });
+    });
+    exps.forEach(function (x, i) {
+      out.push({
+        kind: "payment", number: "ص-" + pad4(i + 1), amount: Number(x.amount) || 0,
+        date: x.spentAt, party: x.vendor || "المورد",
+        description: x.description || x.category,
+        method: "cash", image: x.image, refId: x.id, category: x.category
+      });
+    });
+    return out;
+  }
+  function methodText(m) {
+    return m === "cash" ? "نقدي" : m === "transfer" ? "تحويل" : m === "bank" ? "شبكة / بنك" : (m || "نقدي");
+  }
+
   function getProject(id) {
     for (var i = 0; i < db.projects.length; i++) if (db.projects[i].id === id) return db.projects[i];
     return null;
@@ -260,8 +293,88 @@
   }
 
   /* ───────── الحالة والعرض ───────── */
+  var APP_VERSION = "1.1.0";
   var state = { screen: "home", pid: null, tab: "payments", q: "", filter: "all" };
   var app = document.getElementById("app");
+
+  /* ───────── التحديث التلقائي ───────── */
+  function askServerVersion() {
+    return fetch("./index.html?ts=" + Date.now(), { cache: "no-store" })
+      .then(function (r) { return r.text(); })
+      .then(function (t) {
+        var m = t.match(/APP_VERSION\s*=\s*"([^"]+)"/);
+        return m ? m[1] : null;
+      })
+      .catch(function () { return null; });
+  }
+
+  function showUpdateBar(remote) {
+    if (document.getElementById("update-bar")) return;
+    var bar = document.createElement("div");
+    bar.id = "update-bar";
+    bar.setAttribute("dir", "rtl");
+    bar.style.cssText = "position:fixed;left:10px;right:10px;bottom:14px;z-index:99999;background:#0F172A;color:#fff;border-radius:16px;padding:12px 14px;box-shadow:0 14px 34px rgba(2,6,23,.5);font-family:Cairo,Tahoma,sans-serif;display:flex;align-items:center;gap:10px;border:1px solid rgba(217,119,6,.5)";
+    bar.innerHTML = '<span style="font-size:19px">⬆</span>' +
+      '<span style="flex:1;font-size:12px;font-weight:800;line-height:1.6">إصدار جديد متوفر (' + esc(remote) + ') — حدّث الآن لتحصل على آخر التعديلات</span>' +
+      '<button id="update-now" style="background:#D97706;border:0;color:#fff;border-radius:10px;padding:9px 12px;font-family:inherit;font-size:12px;font-weight:900">تحديث</button>' +
+      '<button id="update-later" style="background:transparent;border:0;color:#94A3B8;font-family:inherit;font-size:16px;font-weight:900;padding:0 4px">✕</button>';
+    document.body.appendChild(bar);
+    document.getElementById("update-now").onclick = hardUpdate;
+    document.getElementById("update-later").onclick = function () { bar.remove(); };
+  }
+
+  function hardUpdate() {
+    try {
+      if ("serviceWorker" in navigator) {
+        navigator.serviceWorker.getRegistrations().then(function (rs) {
+          rs.forEach(function (r) { r.unregister(); });
+        });
+      }
+      if ("caches" in window) {
+        caches.keys().then(function (ks) {
+          ks.forEach(function (k) { caches.delete(k); });
+        });
+      }
+    } catch (e) {}
+    setTimeout(function () {
+      location.reload();
+    }, 350);
+  }
+
+  function checkUpdate(silent) {
+    return askServerVersion().then(function (remote) {
+      if (!remote) {
+        if (!silent) toastMsg("تعذر التحقق — تحقق من الاتصال بالإنترنت", false);
+        return;
+      }
+      if (remote !== APP_VERSION) {
+        showUpdateBar(remote);
+        if (!silent) toastMsg("يوجد إصدار جديد: " + remote, true);
+      } else if (!silent) {
+        toastMsg("أنت على أحدث إصدار (" + APP_VERSION + ") ✓", true);
+      }
+    });
+  }
+
+  function toastMsg(text, ok) {
+    var t = document.createElement("div");
+    t.setAttribute("dir", "rtl");
+    t.style.cssText = "position:fixed;left:16px;right:16px;top:16px;z-index:99999;border-radius:14px;padding:12px 14px;font-family:Cairo,Tahoma,sans-serif;font-size:12.5px;font-weight:800;text-align:center;box-shadow:0 10px 26px rgba(2,6,23,.25);" +
+      (ok ? "background:#ECFDF5;color:#047857;border:1px solid #A7F3D0" : "background:#FEF2F2;color:#B91C1C;border:1px solid #FECACA");
+    t.textContent = text;
+    document.body.appendChild(t);
+    setTimeout(function () { t.remove(); }, 2600);
+  }
+
+  /* فحص تلقائي عند فتح التطبيق وعند العودة إليه */
+  window.addEventListener("load", function () {
+    setTimeout(function () { checkUpdate(true); }, 2500);
+  });
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "visible" && navigator.onLine) {
+      setTimeout(function () { checkUpdate(true); }, 800);
+    }
+  });
 
   function render() {
     if (state.screen === "project") renderProject();
@@ -387,6 +500,72 @@
       "</div>";
   }
 
+  function voucherRow(v) {
+    var isR = v.kind === "receipt";
+    return '<button data-act="open-voucher" data-ref="' + v.refId + '" data-kind="' + v.kind + '" style="display:flex;align-items:center;gap:10px;width:100%;text-align:right;background:#fff;border:0;border-radius:16px;padding:12px;box-shadow:0 6px 20px rgba(30,41,59,.06);font-family:inherit">' +
+      '<span style="display:grid;place-items:center;width:42px;height:42px;flex:0 0 42px;border-radius:12px;font-size:18px;background:' + (isR ? "#ECFDF5" : "#FFFBEB") + '">' + (v.category === "أجور عمال" ? "👷" : isR ? "🧾" : "🧾") + "</span>" +
+      '<span style="min-width:0;flex:1">' +
+      '<span class="num" style="display:block;font-size:15px;font-weight:900;color:#0F172A">' + money(v.amount) + ' <span style="font-size:10px;font-weight:700;color:#94A3B8">ر.س</span> <span style="background:' + (isR ? "#ECFDF5" : "#FFFBEB") + ';color:' + (isR ? "#047857" : "#92400E") + ';border-radius:99px;padding:2px 7px;font-size:9.5px;font-weight:900">' + (isR ? "سند قبض " : "سند صرف ") + v.number + "</span></span>" +
+      '<span class="num" style="display:block;font-size:11.5px;font-weight:700;color:#64748B;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (isR ? "📥 " : "👤 ") + esc(v.party) + " • 📅 " + shortDate(v.date) + "</span>" +
+      "</span>" +
+      '<span style="flex:0 0 auto;font-size:11px;font-weight:900;color:#92400E">عرض 🖨</span>' +
+      "</button>";
+  }
+
+  function openVoucher(refId, kind) {
+    var p = getProject(state.pid);
+    if (!p) return;
+    var v = buildVouchers(state.pid).filter(function (x) { return x.refId === refId && x.kind === kind; })[0];
+    if (!v) return;
+    var isR = v.kind === "receipt";
+    var head = isR ? "#065F46" : "#1E293B";
+    var body = '<article id="voucher-print" style="background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 8px 30px rgba(30,41,59,.12)">' +
+      '<div style="background:' + head + ';color:#fff;padding:14px;text-align:center">' +
+      '<p style="margin:0;font-size:11px;font-weight:700;opacity:.85">حسابات معلم الجبس والديكور</p>' +
+      '<h2 style="margin:2px 0 0;font-size:19px;font-weight:900">' + (isR ? "سند قبض" : "سند صرف") + "</h2>" +
+      '<p class="num" style="margin:6px 0 0;display:inline-block;background:rgba(255,255,255,.15);border-radius:99px;padding:4px 12px;font-size:12px;font-weight:900">رقم: ' + v.number + "</p></div>" +
+      '<div style="background:' + (isR ? "#ECFDF5" : "#FFFBEB") + ';padding:14px;text-align:center">' +
+      '<p style="margin:0;font-size:11px;font-weight:800;color:#64748B">المبلغ</p>' +
+      '<p class="num" style="margin:0;font-size:32px;font-weight:900;color:' + (isR ? "#047857" : "#92400E") + '">' + money(v.amount) + '<span style="font-size:12px;font-weight:700;color:#64748B;margin-inline-start:5px">ر.س</span></p>' +
+      '<p class="num" style="margin:2px 0 0;font-size:11px;font-weight:700;color:#64748B">' + methodText(v.method) + " • " + shortDate(v.date) + "</p></div>" +
+      '<div style="padding:14px;font-size:12.5px">' +
+      vrow("المشروع", esc(p.title)) +
+      vrow("صاحب البيت", esc(p.clientName)) +
+      vrow(isR ? "استلمنا من" : "صُرف إلى", esc(v.party)) +
+      vrow("البيان", esc(v.description || "—")) +
+      vrow("التصنيف", esc(v.category || (isR ? "دفعة مقبوضة" : "مصروف"))) +
+      "</div>" +
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;padding:16px;border-top:1px solid #F1F5F9;text-align:center;font-size:11.5px">' +
+      '<div><p style="margin:0;font-weight:900;color:#334155">توقيع المستلم</p><div style="margin-top:30px;border-top:2px dashed #CBD5E1"></div></div>' +
+      '<div><p style="margin:0;font-weight:900;color:#334155">' + (isR ? "توقيع صاحب البيت" : "توقيع معلم الجبس") + '</p><div style="margin-top:30px;border-top:2px dashed #CBD5E1"></div></div></div>' +
+      '<p style="margin:0;background:#F8FAFC;padding:8px;text-align:center;font-size:10px;font-weight:700;color:#94A3B8">مستند إثبات للحركة المالية المسجلة في التطبيق</p>' +
+      "</article>";
+
+    var waText = "*" + (isR ? "سند قبض" : "سند صرف") + "* رقم " + v.number + "\n" +
+      "━━━━━━━━━━━━━━\n" +
+      "📁 " + p.title + "\n👤 " + p.clientName + "\n" +
+      (isR ? "💰 استلمنا من: " : "👷 صُرف إلى: ") + v.party + "\n" +
+      "💵 المبلغ: " + money(v.amount) + " ر.س\n" +
+      "📅 " + shortDate(v.date) + "\n" +
+      (v.description ? "📝 " + v.description + "\n" : "") +
+      "━━━━━━━━━━━━━━\nحسابات معلم الجبس 🧱";
+
+    host.innerHTML = '<div class="sheet-wrap"><div class="sheet-bg" data-act="close-modal"></div><div class="sheet">' +
+      '<div class="grabber"></div>' +
+      '<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px">' +
+      '<h2 style="margin:0;font-size:16px;font-weight:900">' + (isR ? "📥 سند قبض" : "📤 سند صرف") + "</h2>" +
+      '<button class="iconbtn" style="background:#F1F5F9;color:#64748B" data-act="close-modal">✕</button></div>' +
+      body +
+      '<div class="grid2" style="margin-top:12px">' +
+      '<button onclick="window.print()" style="background:#1E293B;color:#fff;border-radius:12px;padding:13px;font-size:13px;font-weight:900;font-family:inherit">🖨 طباعة / PDF</button>' +
+      '<a href="' + whatsappUrl(p.phone, waText) + '" target="_blank" rel="noopener" style="background:#25D366;color:#fff;border-radius:12px;padding:13px;font-size:13px;font-weight:900;text-align:center;text-decoration:none">✈ واتساب</a>' +
+      "</div></div></div>";
+  }
+
+  function vrow(k, v) {
+    return '<div style="display:flex;justify-content:space-between;gap:10px;border-bottom:1px dashed #E2E8F0;padding:5px 0"><span style="flex:0 0 auto;font-weight:800;color:#94A3B8">' + k + '</span><span style="font-weight:900;color:#0F172A;text-align:left">' + v + "</span></div>";
+  }
+
   function renderProject() {
     var p = getProject(state.pid);
     if (!p) { state.screen = "home"; return renderHome(); }
@@ -454,12 +633,44 @@
     }
 
     // التبويبات
-    html += '<div class="tabs" style="margin-top:14px">' +
-      '<button data-act="tab" data-v="payments" class="' + (state.tab === "payments" ? "on" : "") + '">💵 الدفعات (' + s.paysCount + ")</button>" +
-      '<button data-act="tab" data-v="expenses" class="' + (state.tab === "expenses" ? "on" : "") + '">🧾 المشتريات (' + s.expsCount + ")</button>" +
+    var vlist = buildVouchers(state.pid);
+    html += '<div class="tabs" style="margin-top:14px;grid-template-columns:1fr 1fr 1fr;gap:6px">' +
+      '<button data-act="tab" data-v="payments" style="font-size:12px;padding:10px 0" class="' + (state.tab === "payments" ? "on" : "") + '">💵 الدفعات (' + s.paysCount + ")</button>" +
+      '<button data-act="tab" data-v="expenses" style="font-size:12px;padding:10px 0" class="' + (state.tab === "expenses" ? "on" : "") + '">🧾 المشتريات (' + s.expsCount + ")</button>" +
+      '<button data-act="tab" data-v="vouchers" style="font-size:12px;padding:10px 0" class="' + (state.tab === "vouchers" ? "on" : "") + '">📄 السندات (' + vlist.length + ")</button>" +
       "</div>";
 
-    if (state.tab === "payments") {
+    if (state.tab === "vouchers") {
+      var receipts = vlist.filter(function (v) { return v.kind === "receipt"; });
+      var outs = vlist.filter(function (v) { return v.kind === "payment"; });
+      var recTotal = receipts.reduce(function (a, v) { return a + v.amount; }, 0);
+      var outTotal = outs.reduce(function (a, v) { return a + v.amount; }, 0);
+
+      html += '<div class="grid2" style="margin-top:12px">' +
+        '<div style="background:#ECFDF5;border-radius:12px;padding:12px;text-align:center"><p style="margin:0;font-size:11px;font-weight:800;color:#047857">📥 سندات قبض</p><p class="num" style="margin:0;font-size:17px;font-weight:900;color:#065F46">' + money(recTotal) + '</p><p class="num" style="margin:0;font-size:10px;font-weight:700;color:#059669">' + receipts.length + ' سند</p></div>' +
+        '<div style="background:#FFFBEB;border-radius:12px;padding:12px;text-align:center"><p style="margin:0;font-size:11px;font-weight:800;color:#B45309">📤 سندات صرف</p><p class="num" style="margin:0;font-size:17px;font-weight:900;color:#92400E">' + money(outTotal) + '</p><p class="num" style="margin:0;font-size:10px;font-weight:700;color:#B45309">' + outs.length + ' سند</p></div>' +
+        "</div>";
+
+      html += '<div class="grid2" style="margin-top:10px;gap:8px">' +
+        '<button data-act="add-payment" style="background:#059669;color:#fff;border-radius:12px;padding:11px;font-size:12px;font-weight:900">+ سند قبض 📥</button>' +
+        '<button data-act="add-expense" style="background:#92400E;color:#fff;border-radius:12px;padding:11px;font-size:12px;font-weight:900">+ سند صرف 📤</button>' +
+        "</div>";
+
+      if (vlist.length === 0) {
+        html += '<div class="empty" style="margin-top:12px"><div class="ico">📄</div><p style="margin:0;font-size:15px;font-weight:900;color:#1E293B">لا توجد سندات بعد</p><p style="margin:4px 0 0;font-size:12.5px;font-weight:700;color:#64748B">كل دفعة تُصدر سند قبض، وكل فاتورة أو أجرة تُصدر سند صرف</p></div>';
+      } else {
+        html += '<div style="display:grid;gap:8px;margin-top:12px">';
+        html += '<p class="muted" style="margin:4px 0 0">📥 سندات القبض (' + receipts.length + ")</p>";
+        receipts.forEach(function (v) {
+          html += voucherRow(v);
+        });
+        html += '<p class="muted" style="margin:8px 0 0">📤 سندات الصرف (' + outs.length + ")</p>";
+        outs.forEach(function (v) {
+          html += voucherRow(v);
+        });
+        html += "</div>";
+      }
+    } else if (state.tab === "payments") {
       html += '<div style="display:grid;gap:10px;margin-top:12px">';
       if (s.pays.length === 0) {
         html += '<div class="empty"><div class="ico">💵</div><p style="margin:0;font-size:15px;font-weight:900;color:#1E293B">لا توجد دفعات بعد</p><p style="margin:4px 0 0;font-size:13px;font-weight:700;color:#64748B">سجّل أول دفعة مستلمة من صاحب البيت</p></div>';
@@ -497,9 +708,10 @@
     }
     html += "</main>";
 
-    html += '<div class="bottombar"><div class="in grid2">' +
-      '<button class="gold" style="padding:14px;border-radius:16px;font-size:14px" data-act="add-payment">+ دفعة مقبوضة 💵</button>' +
-      '<button style="background:#1E293B;color:#fff;border-radius:16px;padding:14px;font-size:14px;font-weight:900" data-act="add-expense">+ فاتورة مشتريات 🧾</button>' +
+    html += '<div class="bottombar"><div class="in" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;padding:10px 12px calc(10px + env(safe-area-inset-bottom))">' +
+      '<button class="gold" style="padding:11px 4px;border-radius:14px;font-size:11.5px;line-height:1.3" data-act="add-payment">💵 دفعة /<br>سند قبض</button>' +
+      '<button style="background:#1E293B;color:#fff;border-radius:14px;padding:11px 4px;font-size:11.5px;font-weight:900;line-height:1.3" data-act="add-expense">🧾 فاتورة /<br>سند صرف</button>' +
+      '<button style="background:#065F46;color:#fff;border-radius:14px;padding:11px 4px;font-size:11.5px;font-weight:900;line-height:1.3" data-act="add-labor">👷 أجرة<br>عمال</button>' +
       "</div></div>";
 
     app.innerHTML = html;
@@ -794,6 +1006,8 @@
       '<p style="margin:2px 0 0;font-size:11px;font-weight:700;color:#64748B">صدّر البيانات كملف لنقلها لجوال آخر أو حفظها.</p>' +
       '<button class="gold" style="width:100%;margin-top:10px;padding:13px;font-size:13px" data-act="export">⬇ تنزيل نسخة احتياطية (JSON)</button>' +
       '<button style="width:100%;margin-top:8px;padding:13px;border-radius:16px;background:#F1F5F9;color:#334155;font-size:13px;font-weight:800" data-act="import">⬆ استيراد نسخة احتياطية</button>' +
+      '<button style="width:100%;margin-top:8px;padding:13px;border-radius:16px;background:#1E293B;color:#fff;font-size:13px;font-weight:800" data-act="check-update">🔄 التحقق من التحديثات</button>' +
+      '<div id="ver-box" style="margin-top:8px;text-align:center;font-size:11px;font-weight:800;color:#94A3B8">الإصدار الحالي: <span class="num">' + APP_VERSION + '</span></div>' +
       '<input type="file" accept="application/json,.json" id="import-input" style="display:none">' +
       "</div>" +
       '<div class="card" style="padding:14px">' +
@@ -835,6 +1049,77 @@
     d.innerHTML = '<img src="' + src + '" alt="صورة"><button>إغلاق ✕</button>';
     d.addEventListener("click", function () { d.remove(); });
     document.body.appendChild(d);
+  }
+
+  /* ───────── فاتورة أجرة عمال ───────── */
+  function laborModal(pid) {
+    var s = summary(pid);
+    var tmpL = { image: null };
+    var body = '<div style="display:grid;gap:12px">' +
+      '<div style="border-radius:12px;padding:12px;text-align:center;background:' + (s.cash < 0 ? "#FEF2F2" : "#ECFDF5") + ';box-shadow:inset 0 0 0 1px ' + (s.cash < 0 ? "#FECACA" : "#A7F3D0") + '">' +
+      '<p style="margin:0;font-size:11px;font-weight:900;color:' + (s.cash < 0 ? "#B91C1C" : "#047857") + '">' + (s.cash < 0 ? "🚨 عجز حالي" : "💵 الكاش المتاح لديك") + '</p>' +
+      '<p class="num" style="margin:0;font-size:20px;font-weight:900;color:' + (s.cash < 0 ? "#B91C1C" : "#047857") + '">' + money(Math.abs(s.cash)) + ' <span style="font-size:11px">ر.س</span></p></div>' +
+      '<label><span class="label">اسم العامل / فريق العمل</span><input class="field" id="l-worker" placeholder="مثال: محمد النجار — فريق الجبس"></label>' +
+      '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">' +
+      '<label><span class="label">عدد الأيام</span><input class="field num" id="l-days" type="number" min="0" inputmode="decimal" value="1" style="text-align:center;font-weight:900"></label>' +
+      '<label><span class="label">أجرة اليوم</span><input class="field num" id="l-rate" type="number" min="0" inputmode="decimal" placeholder="0" style="text-align:center;font-weight:900"></label>' +
+      '<label><span class="label">مكافأة</span><input class="field num" id="l-bonus" type="number" min="0" inputmode="decimal" placeholder="0" style="text-align:center"></label>' +
+      "</div>" +
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">' +
+      '<label><span class="label">خصم / سلفة</span><input class="field num" id="l-ded" type="number" min="0" inputmode="decimal" placeholder="0" style="text-align:center"></label>' +
+      '<label><span class="label">التاريخ</span><input class="field num" id="l-date" type="date" value="' + todayInput() + '"></label>' +
+      "</div>" +
+      '<div style="background:#1E293B;color:#fff;border-radius:14px;padding:14px;text-align:center">' +
+      '<p style="margin:0;font-size:11px;font-weight:800;color:#CBD5E1">إجمالي الأجرة المستحقة</p>' +
+      '<p class="num" id="l-total" style="margin:2px 0 0;font-size:28px;font-weight:900">0 <span style="font-size:12px">ر.س</span></p>' +
+      '<p class="num" id="l-eq" style="margin:2px 0 0;font-size:11px;font-weight:700;color:#94A3B8">—</p></div>' +
+      '<div id="l-alert"></div>' +
+      '<label><span class="label">ملاحظة</span><input class="field" id="l-note" placeholder="مثال: تركيب جبس المجلس"></label>' +
+      '<div><span class="label">📷 صورة إيصال الأجرة <span style="color:#94A3B8;font-weight:600">(اختياري)</span></span>' + imageBlock(null, "التقط صورة الإيصال") + "</div>" +
+      '<input type="file" accept="image/*" capture="environment" id="file-input" style="display:none">' +
+      '<div id="l-err"></div>' +
+      '<button class="gold" id="l-save" style="width:100%;padding:15px;font-size:15px" data-act="save-labor">حفظ فاتورة الأجرة + سند صرف ✓</button>' +
+      '<p style="margin:0;text-align:center;font-size:10.5px;font-weight:800;color:#94A3B8">يُسجَّل كمصروف «أجور عمال» ويصدر له سند صرف مرقّم</p>' +
+      "</div>";
+
+    sheet("👷 فاتورة أجرة عمال", "احسب الأجرة تلقائياً وأصدر سند صرف", body);
+    tmp.pid = pid;
+    tmp.image = null;
+    tmp.laborImage = null;
+
+    function calc() {
+      var d = Number((document.getElementById("l-days") || {}).value) || 0;
+      var r = Number((document.getElementById("l-rate") || {}).value) || 0;
+      var b = Number((document.getElementById("l-bonus") || {}).value) || 0;
+      var ded = Number((document.getElementById("l-ded") || {}).value) || 0;
+      var total = Math.max(0, d * r + b - ded);
+      var tEl = document.getElementById("l-total");
+      var eqEl = document.getElementById("l-eq");
+      var alertEl = document.getElementById("l-alert");
+      if (tEl) tEl.innerHTML = money(total) + ' <span style="font-size:12px">ر.س</span>';
+      if (eqEl) eqEl.textContent = money(d) + " × " + money(r) + (b > 0 ? " + " + money(b) : "") + (ded > 0 ? " − " + money(ded) : "");
+      var after = s.cash - total;
+      if (total > 0 && after < 0) {
+        var deficit = Math.abs(after);
+        if (alertEl) alertEl.innerHTML = '<div class="notice danger">🚨 تنبيه عجز: ' + money(deficit) + ' ر.س' +
+          '<span class="eq num">العجز = المصروف بعد الأجرة − المقبوض = ' + money(s.spent + total) + " − " + money(s.received) + " = " + money(deficit) + "</span>" +
+          "ستدفع الفرق من جيبك حتى تستلم الدفعة القادمة." +
+          '<label style="display:flex;align-items:center;gap:8px;margin-top:8px;background:#fff;border-radius:9px;padding:8px;font-size:12px;font-weight:900;color:#B91C1C"><input type="checkbox" id="l-ack" style="width:16px;height:16px;accent-color:#DC2626"> أفهم العجز وأريد صرف الأجرة</label></div>';
+        var btn = document.getElementById("l-save");
+        if (btn) btn.textContent = "صرف الأجرة مع العجز ⚠️";
+      } else if (total > 0) {
+        if (alertEl) alertEl.innerHTML = '<div class="notice ok">✅ الكاش يكفي — سيتبقى ' + money(after) + " ر.س</div>";
+        var btn2 = document.getElementById("l-save");
+        if (btn2) btn2.textContent = "حفظ فاتورة الأجرة + سند صرف ✓";
+      } else {
+        if (alertEl) alertEl.innerHTML = "";
+      }
+    }
+    ["l-days", "l-rate", "l-bonus", "l-ded"].forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el) el.addEventListener("input", calc);
+    });
+    calc();
   }
 
   /* ───────── الأحداث ───────── */
@@ -890,6 +1175,48 @@
       });
       document.body.appendChild(menu);
       return;
+    }
+
+    if (act === "open-voucher") return openVoucher(el.dataset.ref, el.dataset.kind);
+    if (act === "add-labor") return laborModal(state.pid);
+    if (act === "save-labor") {
+      var L = function (id) { return (document.getElementById(id) || {}).value || ""; };
+      var worker = L("l-worker").trim();
+      var days = Number(L("l-days")) || 0;
+      var rate = Number(L("l-rate")) || 0;
+      var bonus = Number(L("l-bonus")) || 0;
+      var ded = Number(L("l-ded")) || 0;
+      var note = L("l-note").trim();
+      var dateStr = L("l-date") || todayInput();
+      var total = Math.max(0, days * rate + bonus - ded);
+      var errBox2 = document.getElementById("l-err");
+      if (!worker) {
+        errBox2.innerHTML = '<p style="margin:0;background:#FEF2F2;color:#B91C1C;border-radius:12px;padding:10px;text-align:center;font-size:13px;font-weight:800">فضلاً أدخل اسم العامل أو فريق العمل</p>';
+        return;
+      }
+      if (total <= 0) {
+        errBox2.innerHTML = '<p style="margin:0;background:#FEF2F2;color:#B91C1C;border-radius:12px;padding:10px;text-align:center;font-size:13px;font-weight:800">فضلاً أدخل عدد الأيام والأجرة اليومية</p>';
+        return;
+      }
+      var sumL = summary(tmp.pid);
+      if (total > sumL.cash) {
+        var ackL = document.getElementById("l-ack");
+        if (!ackL || !ackL.checked) {
+          errBox2.innerHTML = '<p style="margin:0;background:#FEF2F2;color:#B91C1C;border-radius:12px;padding:10px;text-align:center;font-size:13px;font-weight:800">أجرة العمال تُحدث عجزاً — يرجى تأكيد التنبيه أولاً</p>';
+          return;
+        }
+      }
+      var parts = [days + " " + (days === 1 ? "يوم" : "أيام") + " × " + money(rate) + " ر.س"];
+      if (bonus > 0) parts.push("مكافأة " + money(bonus));
+      if (ded > 0) parts.push("خصم " + money(ded));
+      if (note) parts.push(note);
+      db.expenses.unshift({
+        id: uid(), projectId: tmp.pid, amount: total,
+        spentAt: new Date(dateStr + "T12:00:00").toISOString(),
+        category: "أجور عمال", vendor: worker, description: parts.join(" • "),
+        image: tmp.image
+      });
+      save(); closeModal(); render(); return;
     }
 
     if (act === "add-payment") return paymentModal(state.pid);
@@ -1038,6 +1365,26 @@
       }
       return;
     }
+
+    if (act === "check-update") {
+      var vb = document.getElementById("ver-box");
+      if (vb) vb.textContent = "جارٍ التحقق…";
+      askServerVersion().then(function (remote) {
+        var box = document.getElementById("ver-box");
+        if (!remote) {
+          if (box) box.textContent = "تعذر التحقق — تأكد من الاتصال";
+          return;
+        }
+        if (remote !== APP_VERSION) {
+          if (box) box.textContent = "إصدار جديد: " + remote;
+          showUpdateBar(remote);
+        } else if (box) {
+          box.textContent = "أنت على أحدث إصدار " + APP_VERSION + " ✓";
+        }
+      });
+      return;
+    }
+    if (act === "force-update") return hardUpdate();
 
     if (act === "export") {
       var payload = JSON.stringify({ app: "gypsum-accounting", version: 1, exportedAt: new Date().toISOString(), data: db }, null, 2);
