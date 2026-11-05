@@ -128,7 +128,7 @@
   var db = load();
 
   function blank() {
-    return { projects: [], payments: [], expenses: [] };
+    return { projects: [], payments: [], expenses: [], settings: { base: "SAR", rate: 150 } };
   }
   function load() {
     try {
@@ -138,7 +138,8 @@
       return {
         projects: Array.isArray(d.projects) ? d.projects : [],
         payments: Array.isArray(d.payments) ? d.payments : [],
-        expenses: Array.isArray(d.expenses) ? d.expenses : []
+        expenses: Array.isArray(d.expenses) ? d.expenses : [],
+        settings: d.settings && d.settings.base ? d.settings : { base: "SAR", rate: 150 }
       };
     } catch (e) { return blank(); }
   }
@@ -160,6 +161,77 @@
     n = Number(n) || 0;
     return n.toLocaleString("en-US", { maximumFractionDigits: 2 });
   }
+  /* ───────── العملات وسعر الصرف ───────── */
+  var CUR = {
+    SAR: { code: "SAR", symbol: "ر.س", name: "ريال سعودي" },
+    YER: { code: "YER", symbol: "ر.ي", name: "ريال يمني" }
+  };
+  function settings() {
+    if (!db.settings || !db.settings.base) db.settings = { base: "SAR", rate: 150 };
+    return db.settings;
+  }
+  function baseCur() { return settings().base || "SAR"; }
+  function fxRate() { var r = Number(settings().rate); return r > 0 ? r : 150; }
+  function sym(cur) { return (CUR[cur || baseCur()] || CUR.SAR).symbol; }
+  function curName(cur) { return (CUR[cur || baseCur()] || CUR.SAR).name; }
+
+  /** تحويل أي مبلغ إلى العملة الأساسية (1 ريال سعودي = fxRate ريال يمني) */
+  function toBase(amount, cur) {
+    amount = Number(amount) || 0;
+    cur = cur || baseCur();
+    var base = baseCur(), rate = fxRate();
+    if (cur === base) return amount;
+    if (cur === "SAR" && base === "YER") return amount * rate;
+    if (cur === "YER" && base === "SAR") return amount / rate;
+    return amount;
+  }
+  /** تحويل من العملة الأساسية إلى عملة أخرى */
+  function fromBase(amount, cur) {
+    amount = Number(amount) || 0;
+    cur = cur || baseCur();
+    var base = baseCur(), rate = fxRate();
+    if (cur === base) return amount;
+    if (cur === "YER" && base === "SAR") return amount * rate;
+    if (cur === "SAR" && base === "YER") return amount / rate;
+    return amount;
+  }
+  /** مبلغ بعملته الأصلية */
+  function fmt(amount, cur) { return money(amount) + " " + sym(cur); }
+  /** مبلغ بالعملة الأساسية */
+  function fmtBase(amount) { return money(amount) + " " + sym(baseCur()); }
+  /** مبلغ + المعادل بالعملة الأساسية عند الاختلاف */
+  function fmtBoth(amount, cur) {
+    cur = cur || baseCur();
+    var a = fmt(amount, cur);
+    if (cur === baseCur()) return a;
+    return a + ' <span style="font-size:9.5px;font-weight:700;color:#94A3B8">≈ ' + fmtBase(toBase(amount, cur)) + "</span>";
+  }
+  function curOptions(selected) {
+    selected = selected || baseCur();
+    return Object.keys(CUR).map(function (k) {
+      return '<option value="' + k + '"' + (k === selected ? " selected" : "") + ">" + CUR[k].name + " (" + CUR[k].symbol + ")</option>";
+    }).join("");
+  }
+  function currencyBadge(cur) {
+    cur = cur || baseCur();
+    return '<span style="background:' + (cur === "SAR" ? "#ECFDF5;color:#047857" : "#EEF2FF;color:#3730A3") + ';border-radius:6px;padding:1px 5px;font-size:9px;font-weight:900">' + sym(cur) + "</span>";
+  }
+
+  function curBreak(obj) {
+    var parts = [];
+    Object.keys(obj || {}).forEach(function (c) {
+      if (obj[c]) parts.push(money(obj[c]) + " " + sym(c));
+    });
+    return parts.length ? " — " + parts.join(" + ") : "";
+  }
+  function isMultiCur(s) {
+    return (Object.keys(s.recBy || {}).length + Object.keys(s.spentBy || {}).length) > 1 ||
+      Object.keys(s.spentBy || {}).some(function (c) { return c !== baseCur(); });
+  }
+  function breakText(s) {
+    return "📥 " + (curBreak(s.recBy).replace(" — ", "") || "—") + " • 📤 " + (curBreak(s.spentBy).replace(" — ", "") || "—");
+  }
+
   function shortDate(iso) {
     try {
       var d = new Date(iso);
@@ -193,9 +265,20 @@
     var p = getProject(pid);
     var pays = db.payments.filter(function (x) { return x.projectId === pid; });
     var exps = db.expenses.filter(function (x) { return x.projectId === pid; });
-    var agreement = p ? Number(p.agreementTotal) || 0 : 0;
-    var rec = pays.reduce(function (s, x) { return s + (Number(x.amount) || 0); }, 0);
-    var spent = exps.reduce(function (s, x) { return s + (Number(x.amount) || 0); }, 0);
+    var agreementCur = p ? (p.currency || baseCur()) : baseCur();
+    var agreementRaw = p ? Number(p.agreementTotal) || 0 : 0;
+    var agreement = toBase(agreementRaw, agreementCur);
+    var rec = 0, spent = 0, recBy = {}, spentBy = {};
+    pays.forEach(function (x) {
+      var c = x.currency || baseCur();
+      rec += toBase(x.amount, c);
+      recBy[c] = (recBy[c] || 0) + (Number(x.amount) || 0);
+    });
+    exps.forEach(function (x) {
+      var c = x.currency || baseCur();
+      spent += toBase(x.amount, c);
+      spentBy[c] = (spentBy[c] || 0) + (Number(x.amount) || 0);
+    });
     var cash = rec - spent;
     return {
       agreement: agreement,
@@ -207,6 +290,10 @@
       progress: agreement > 0 ? Math.min(100, Math.round((rec / agreement) * 100)) : 0,
       paysCount: pays.length,
       expsCount: exps.length,
+      agreementRaw: agreementRaw,
+      agreementCur: agreementCur,
+      recBy: recBy,
+      spentBy: spentBy,
       pays: pays.slice().sort(function (a, b) { return new Date(b.paidAt) - new Date(a.paidAt); }),
       exps: exps.slice().sort(function (a, b) { return new Date(b.spentAt) - new Date(a.spentAt); })
     };
@@ -227,6 +314,7 @@
         kind: "receipt", number: "ق-" + pad4(i + 1), amount: Number(x.amount) || 0,
         date: x.paidAt, party: "صاحب البيت",
         description: x.note || "دفعة مقبوضة من صاحب البيت",
+        currency: x.currency || baseCur(),
         method: x.method, image: x.image, refId: x.id, category: "دفعة مقبوضة"
       });
     });
@@ -235,6 +323,7 @@
         kind: "payment", number: "ص-" + pad4(i + 1), amount: Number(x.amount) || 0,
         date: x.spentAt, party: x.vendor || "المورد",
         description: x.description || x.category,
+        currency: x.currency || baseCur(),
         method: "cash", image: x.image, refId: x.id, category: x.category
       });
     });
@@ -262,13 +351,13 @@
     L.push("🏠 المشروع: " + project.title);
     L.push("👤 صاحب البيت: " + project.clientName);
     L.push("━━━━━━━━━━━━━━");
-    L.push("💰 قيمة الاتفاقية: " + money(s.agreement) + " ر.س");
-    L.push("✅ إجمالي المقبوض: " + money(s.received) + " ر.س (" + s.paysCount + " دفعات)");
-    L.push("🧱 إجمالي المصروفات: " + money(s.spent) + " ر.س (" + s.expsCount + " فواتير)");
+    L.push("💰 قيمة الاتفاقية: " + fmt(s.agreementRaw, s.agreementCur) + (s.agreementCur !== baseCur() ? " (≈ " + fmtBase(s.agreement) + ")" : ""));
+    L.push("✅ إجمالي المقبوض: " + fmtBase(s.received) + " (" + s.paysCount + " دفعات)" + curBreak(s.recBy));
+    L.push("🧱 إجمالي المصروفات: " + fmtBase(s.spent) + " (" + s.expsCount + " فواتير)" + curBreak(s.spentBy));
     L.push(s.cash < 0
       ? "🚨 عجز مؤقت في الكاش: " + money(Math.abs(s.cash)) + " ر.س (المصروفات أعلى من المقبوضات)"
-      : "💵 الكاش المتبقي باليد: " + money(s.cash) + " ر.س");
-    L.push("📌 المتبقي على صاحب البيت: " + money(s.remaining) + " ر.س");
+      : "💵 الكاش المتبقي باليد: " + fmtBase(s.cash));
+    L.push("📌 المتبقي على صاحب البيت: " + fmtBase(s.remaining));
     if (s.cash < 0) {
       L.push("━━━━━━━━━━━━━━");
       L.push("⚠️ ملاحظة: تمت تغطية فرق " + money(Math.abs(s.cash)) + " ر.س من جيب معلم الجبس كعهدة مؤقتة، ويُستقطع من الدفعة القادمة.");
@@ -282,11 +371,11 @@
     var ask = s.remaining > 0 ? s.remaining : s.deficit;
     var L = ["السلام عليكم " + project.clientName + " 🌙", "بخصوص مشروع: " + project.title, ""];
     if (s.deficit > 0) {
-      L.push("تم صرف مواد ومشتريات بقيمة تتجاوز المقبوض بمقدار " + money(s.deficit) + " ر.س،");
+      L.push("تم صرف مواد ومشتريات بقيمة تتجاوز المقبوض بمقدار " + fmtBase(s.deficit) + "،");
       L.push("وذلك لتسريع سير العمل 🙏");
     }
-    if (s.remaining > 0) L.push("المتبقي من قيمة الاتفاقية: " + money(s.remaining) + " ر.س");
-    if (ask > 0) L.push("نرجو تحويل دفعة بقيمة " + money(ask) + " ر.س لاستكمال المواد.");
+    if (s.remaining > 0) L.push("المتبقي من قيمة الاتفاقية: " + fmtBase(s.remaining));
+    if (ask > 0) L.push("نرجو تحويل دفعة بقيمة " + fmtBase(ask) + " لاستكمال المواد.");
     L.push("");
     L.push("شاكرين تعاونكم 🤝");
     return L.join("\n");
@@ -418,7 +507,7 @@
     html += '<section class="navy"><div style="padding:18px 18px 14px">' +
       '<p style="margin:0;font-size:12px;font-weight:700;color:#CBD5E1">إجمالي قيم الاتفاقيات</p>' +
       '<p class="num" style="margin:4px 0 0;font-size:32px;font-weight:900;line-height:1">' + money(totalAgreement) +
-      '<span style="font-size:13px;font-weight:700;color:#CBD5E1;margin-inline-start:6px">ر.س</span></p>' +
+      '<span style="font-size:13px;font-weight:700;color:#CBD5E1;margin-inline-start:6px">' + sym(baseCur()) + '</span></p>' +
       '<div class="grid3" style="margin-top:14px">' +
       '<div class="tile"><p style="font-size:11px;font-weight:700;color:#6EE7B7">✅ مقبوض</p><p class="num" style="font-size:16px;font-weight:900;color:#6EE7B7;margin-top:2px;overflow:hidden;text-overflow:ellipsis">' + money(totalRec) + "</p></div>" +
       '<div class="tile"><p style="font-size:11px;font-weight:700;color:#FDA4AF">🧾 مصروف</p><p class="num" style="font-size:16px;font-weight:900;color:#FDA4AF;margin-top:2px;overflow:hidden;text-overflow:ellipsis">' + money(totalSpent) + "</p></div>" +
@@ -505,7 +594,7 @@
     return '<button data-act="open-voucher" data-ref="' + v.refId + '" data-kind="' + v.kind + '" style="display:flex;align-items:center;gap:10px;width:100%;text-align:right;background:#fff;border:0;border-radius:16px;padding:12px;box-shadow:0 6px 20px rgba(30,41,59,.06);font-family:inherit">' +
       '<span style="display:grid;place-items:center;width:42px;height:42px;flex:0 0 42px;border-radius:12px;font-size:18px;background:' + (isR ? "#ECFDF5" : "#FFFBEB") + '">' + (v.category === "أجور عمال" ? "👷" : isR ? "🧾" : "🧾") + "</span>" +
       '<span style="min-width:0;flex:1">' +
-      '<span class="num" style="display:block;font-size:15px;font-weight:900;color:#0F172A">' + money(v.amount) + ' <span style="font-size:10px;font-weight:700;color:#94A3B8">ر.س</span> <span style="background:' + (isR ? "#ECFDF5" : "#FFFBEB") + ';color:' + (isR ? "#047857" : "#92400E") + ';border-radius:99px;padding:2px 7px;font-size:9.5px;font-weight:900">' + (isR ? "سند قبض " : "سند صرف ") + v.number + "</span></span>" +
+      '<span class="num" style="display:block;font-size:15px;font-weight:900;color:#0F172A">' + money(v.amount) + ' <span style="font-size:10px;font-weight:700;color:#94A3B8">' + sym(v.currency) + '</span>' + ((v.currency && v.currency !== baseCur()) ? ' <span class="num" style="font-size:9.5px;font-weight:800;color:#047857">≈ ' + money(toBase(v.amount, v.currency)) + ' ' + sym(baseCur()) + '</span>' : '') + ' <span style="background:' + (isR ? "#ECFDF5" : "#FFFBEB") + ';color:' + (isR ? "#047857" : "#92400E") + ';border-radius:99px;padding:2px 7px;font-size:9.5px;font-weight:900">' + (isR ? "سند قبض " : "سند صرف ") + v.number + "</span></span>" +
       '<span class="num" style="display:block;font-size:11.5px;font-weight:700;color:#64748B;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (isR ? "📥 " : "👤 ") + esc(v.party) + " • 📅 " + shortDate(v.date) + "</span>" +
       "</span>" +
       '<span style="flex:0 0 auto;font-size:11px;font-weight:900;color:#92400E">عرض 🖨</span>' +
@@ -526,7 +615,8 @@
       '<p class="num" style="margin:6px 0 0;display:inline-block;background:rgba(255,255,255,.15);border-radius:99px;padding:4px 12px;font-size:12px;font-weight:900">رقم: ' + v.number + "</p></div>" +
       '<div style="background:' + (isR ? "#ECFDF5" : "#FFFBEB") + ';padding:14px;text-align:center">' +
       '<p style="margin:0;font-size:11px;font-weight:800;color:#64748B">المبلغ</p>' +
-      '<p class="num" style="margin:0;font-size:32px;font-weight:900;color:' + (isR ? "#047857" : "#92400E") + '">' + money(v.amount) + '<span style="font-size:12px;font-weight:700;color:#64748B;margin-inline-start:5px">ر.س</span></p>' +
+      '<p class="num" style="margin:0;font-size:32px;font-weight:900;color:' + (isR ? "#047857" : "#92400E") + '">' + money(v.amount) + '<span style="font-size:12px;font-weight:700;color:#64748B;margin-inline-start:5px">' + sym(v.currency) + '</span></p>' +
+      ((v.currency && v.currency !== baseCur()) ? '<p class="num" style="margin:2px 0 0;font-size:11.5px;font-weight:800;color:#475569">ما يعادل ' + fmtBase(toBase(v.amount, v.currency)) + '</p>' : '') +
       '<p class="num" style="margin:2px 0 0;font-size:11px;font-weight:700;color:#64748B">' + methodText(v.method) + " • " + shortDate(v.date) + "</p></div>" +
       '<div style="padding:14px;font-size:12.5px">' +
       vrow("المشروع", esc(p.title)) +
@@ -545,7 +635,7 @@
       "━━━━━━━━━━━━━━\n" +
       "📁 " + p.title + "\n👤 " + p.clientName + "\n" +
       (isR ? "💰 استلمنا من: " : "👷 صُرف إلى: ") + v.party + "\n" +
-      "💵 المبلغ: " + money(v.amount) + " ر.س\n" +
+      "💵 المبلغ: " + fmt(v.amount, v.currency) + (v.currency !== baseCur() ? " (≈ " + fmtBase(toBase(v.amount, v.currency)) + ")" : "") + "\n" +
       "📅 " + shortDate(v.date) + "\n" +
       (v.description ? "📝 " + v.description + "\n" : "") +
       "━━━━━━━━━━━━━━\nحسابات معلم الجبس 🧱";
@@ -585,13 +675,17 @@
     html += '<section class="navy"><div style="padding:18px">' +
       '<div style="display:flex;justify-content:space-between;align-items:flex-start">' +
       '<div><p style="margin:0;font-size:12px;font-weight:700;color:#CBD5E1">💰 قيمة الاتفاقية</p>' +
-      '<p class="num" style="margin:4px 0 0;font-size:29px;font-weight:900;line-height:1">' + money(s.agreement) +
-      '<span style="font-size:12px;font-weight:700;color:#CBD5E1;margin-inline-start:5px">ر.س</span></p></div>' +
+      '<p class="num" style="margin:4px 0 0;font-size:29px;font-weight:900;line-height:1">' + money(s.agreementRaw || s.agreement) +
+      '<span style="font-size:12px;font-weight:700;color:#CBD5E1;margin-inline-start:5px">' + sym(s.agreementCur) + '</span></p>' +
+      ((s.agreementCur !== baseCur()) ? '<p class="num" style="margin:2px 0 0;font-size:11px;font-weight:800;color:#94A3B8">≈ ' + fmtBase(s.agreement) + '</p>' : '') + '</div>' +
       '<div style="text-align:left"><span class="pill" style="background:' + (p.status === "completed" ? "#F1F5F9;color:#334155" : p.status === "paused" ? "#FEF3C7;color:#92400E" : "#D1FAE5;color:#065F46") + '">' +
       (p.status === "completed" ? "● مكتمل" : p.status === "paused" ? "● متوقف" : "● نشط") + "</span>" +
       '<p class="num" style="margin:8px 0 0;font-size:12px;font-weight:900;color:#FCD34D">تحصيل ' + s.progress + "%</p></div></div>" +
       '<div class="progress" style="margin-top:12px;background:rgba(255,255,255,.12)"><i style="width:' + s.progress + '%"></i></div>' +
       summaryTiles(s) +
+      (isMultiCur(s)
+        ? '<div class="num" style="margin-top:10px;background:rgba(255,255,255,.06);border-radius:10px;padding:8px 10px;font-size:10.5px;font-weight:800;color:#CBD5E1;line-height:1.8">' + breakText(s) + '<br>💱 1 ' + sym("SAR") + " = " + money(fxRate()) + " " + sym("YER") + " • العملة الأساسية " + sym(baseCur()) + '</div>'
+        : "") +
       '</div>' +
       '<div class="card-actions">' +
       (p.phone
@@ -617,10 +711,10 @@
         '<div style="width:44px;height:44px;flex:0 0 44px;border-radius:12px;background:#DC2626;color:#fff;display:grid;place-items:center;font-size:20px">🚨</div>' +
         '<div style="min-width:0;flex:1">' +
         '<div style="font-size:14px;font-weight:900;color:#991B1B">تنبيه عجز في الكاش</div>' +
-        '<div class="num" style="font-size:24px;font-weight:900;color:#B91C1C;line-height:1.1">' + money(s.deficit) + '<span style="font-size:12px;font-weight:700;margin-inline-start:4px">ر.س</span></div>' +
-        '<span class="eq num">المصروفات ' + money(s.spent) + " − المقبوضات " + money(s.received) + " = العجز " + money(s.deficit) + "</span>" +
+        '<div class="num" style="font-size:24px;font-weight:900;color:#B91C1C;line-height:1.1">' + money(s.deficit) + '<span style="font-size:12px;font-weight:700;margin-inline-start:4px">' + sym(baseCur()) + '</span></div>' +
+        '<span class="eq num">المصروفات ' + fmtBase(s.spent) + " − المقبوضات " + fmtBase(s.received) + " = العجز " + fmtBase(s.deficit) + "</span>" + (isMultiCur(s) ? '<span class="eq num">' + breakText(s) + '</span>' : '') +
         '<div style="margin-top:6px;color:#B91C1C">مصروفاتك تجاوزت المقبوضات — هذا المبلغ مدفوع من جيبك.' +
-        (s.remaining > 0 ? " المتبقي على صاحب البيت " + money(s.remaining) + " ر.س، اطلب دفعة لتغطية العجز." : " لا يوجد مبلغ متبقٍ على صاحب البيت حسب الاتفاقية.") + "</div>" +
+        (s.remaining > 0 ? " المتبقي على صاحب البيت " + fmtBase(s.remaining) + "، اطلب دفعة لتغطية العجز." : " لا يوجد مبلغ متبقٍ على صاحب البيت حسب الاتفاقية.") + "</div>" +
         '<div style="display:flex;gap:8px;margin-top:10px">' +
         '<a class="wa" style="flex:1;border-radius:11px;padding:10px;text-align:center;font-size:12px;font-weight:900;text-decoration:none" href="' + whatsappUrl(p.phone, requestText(p, s)) + '" target="_blank" rel="noopener">📩 اطلب دفعة</a>' +
         '<button style="flex:1;border-radius:11px;padding:10px;background:#fff;color:#B91C1C;box-shadow:inset 0 0 0 1px #FECACA;font-size:12px;font-weight:900" data-act="statement">🖨 كشف الحساب</button>' +
@@ -628,7 +722,7 @@
     } else if (s.received > 0) {
       html += '<section class="notice ok" style="margin-top:12px">' +
         (s.cash > 0
-          ? "💰 كاش زائد باليد " + money(s.cash) + " ر.س — المصروفات مغطاة بالكامل."
+          ? "💰 كاش زائد باليد " + fmtBase(s.cash) + " — المصروفات مغطاة بالكامل."
           : "✅ لا يوجد عجز — المقبوضات تغطي المصروفات بالضبط.") + "</section>";
     }
 
@@ -679,7 +773,8 @@
           html += '<div class="listitem">' +
             '<div class="ic" style="background:#ECFDF5;color:#047857">💵</div>' +
             '<div style="min-width:0;flex:1"><p class="num" style="margin:0;font-size:17px;font-weight:900;color:#0F172A">' + money(x.amount) +
-            '<span style="font-size:11px;font-weight:700;color:#94A3B8;margin-inline-start:4px">ر.س</span></p>' +
+            '<span style="font-size:11px;font-weight:700;color:#94A3B8;margin-inline-start:4px">' + sym(x.currency) + '</span>' +
+            ((x.currency && x.currency !== baseCur()) ? ' <span class="num" style="font-size:10.5px;font-weight:800;color:#047857">≈ ' + fmtBase(toBase(x.amount, x.currency)) + '</span>' : "") + '</p>' +
             '<p style="margin:2px 0 0;font-size:12px;font-weight:700;color:#64748B;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">📅 ' + shortDate(x.paidAt) + " • " + esc(x.method === "cash" ? "نقدي" : x.method === "transfer" ? "تحويل" : "شبكة / بنك") + (x.note ? " • " + esc(x.note) : "") + "</p></div>" +
             (x.image ? '<img class="thumb" src="' + x.image + '" alt="سند" data-act="viewimg" data-src="' + x.image + '">' : "") +
             '<button class="del" data-act="del-pay" data-id="' + x.id + '">🗑</button>' +
@@ -696,7 +791,8 @@
           html += '<div class="listitem">' +
             '<div class="ic" style="background:#FFF1F2;color:#BE123C">🧾</div>' +
             '<div style="min-width:0;flex:1"><p class="num" style="margin:0;font-size:17px;font-weight:900;color:#0F172A">' + money(x.amount) +
-            '<span style="font-size:11px;font-weight:700;color:#94A3B8;margin-inline-start:4px">ر.س</span></p>' +
+            '<span style="font-size:11px;font-weight:700;color:#94A3B8;margin-inline-start:4px">' + sym(x.currency) + '</span>' +
+            ((x.currency && x.currency !== baseCur()) ? ' <span class="num" style="font-size:10.5px;font-weight:800;color:#BE123C">≈ ' + fmtBase(toBase(x.amount, x.currency)) + '</span>' : "") + '</p>' +
             '<p style="margin:2px 0 0;font-size:12px;font-weight:700;color:#64748B;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(x.category) + (x.vendor ? " • 🏪 " + esc(x.vendor) : "") + (x.description ? " • " + esc(x.description) : "") + "</p>" +
             '<p class="num" style="margin:0;font-size:11px;font-weight:700;color:#94A3B8">📅 ' + shortDate(x.spentAt) + "</p></div>" +
             (x.image ? '<img class="thumb" src="' + x.image + '" alt="فاتورة" data-act="viewimg" data-src="' + x.image + '">' : "") +
@@ -737,17 +833,31 @@
       (p.address ? '<div style="background:#F8FAFC;border-radius:12px;padding:10px"><p class="muted" style="margin:0">📍 العنوان</p><p style="margin:2px 0 0;font-size:13px;font-weight:900">' + esc(p.address) + "</p></div>" : "") +
       "</div>" +
       '<div class="grid2" style="margin:0 14px;background:#1E293B;border-radius:14px;padding:12px;text-align:center;gap:8px">' +
-      '<div class="tile"><p style="font-size:11px;font-weight:700;color:#CBD5E1">قيمة الاتفاقية</p><p class="num" style="font-size:17px;font-weight:900">' + money(s.agreement) + "</p></div>" +
-      '<div class="tile"><p style="font-size:11px;font-weight:700;color:#6EE7B7">إجمالي المقبوض</p><p class="num" style="font-size:17px;font-weight:900;color:#6EE7B7">' + money(s.received) + "</p></div>" +
-      '<div class="tile"><p style="font-size:11px;font-weight:700;color:#FDA4AF">إجمالي المصروف</p><p class="num" style="font-size:17px;font-weight:900;color:#FDA4AF">' + money(s.spent) + "</p></div>" +
-      '<div class="tile" style="background:rgba(217,119,6,.3);box-shadow:inset 0 0 0 1px rgba(217,119,6,.5)"><p style="font-size:11px;font-weight:700;color:#FCD34D">المتبقي على الزبون</p><p class="num" style="font-size:17px;font-weight:900;color:#FCD34D">' + money(s.remaining) + "</p></div>" +
+      '<div class="tile"><p style="font-size:11px;font-weight:700;color:#CBD5E1">قيمة الاتفاقية</p><p class="num" style="font-size:17px;font-weight:900">' + fmt(s.agreementRaw, s.agreementCur) + "</p></div>" +
+      '<div class="tile"><p style="font-size:11px;font-weight:700;color:#6EE7B7">إجمالي المقبوض</p><p class="num" style="font-size:17px;font-weight:900;color:#6EE7B7">' + fmtBase(s.received) + "</p></div>" +
+      '<div class="tile"><p style="font-size:11px;font-weight:700;color:#FDA4AF">إجمالي المصروف</p><p class="num" style="font-size:17px;font-weight:900;color:#FDA4AF">' + fmtBase(s.spent) + "</p></div>" +
+      '<div class="tile" style="background:rgba(217,119,6,.3);box-shadow:inset 0 0 0 1px rgba(217,119,6,.5)"><p style="font-size:11px;font-weight:700;color:#FCD34D">المتبقي على الزبون</p><p class="num" style="font-size:17px;font-weight:900;color:#FCD34D">' + fmtBase(s.remaining) + "</p></div>" +
       "</div>";
+
+    // تفصيل العملات
+    var multi = Object.keys(s.recBy || {}).length > 1 || Object.keys(s.spentBy || {}).length > 1 ||
+      Object.keys(s.spentBy || {}).some(function (c) { return c !== baseCur(); }) ||
+      s.agreementCur !== baseCur();
+    if (multi) {
+      html += '<div class="num" style="margin:12px 14px 0;background:#F8FAFC;border-radius:14px;padding:10px 12px;font-size:11px;font-weight:800;color:#334155;line-height:1.9;box-shadow:inset 0 0 0 1px #E2E8F0">' +
+        '<b style="color:#0F172A">💱 تفصيل العملات</b><br>' +
+        'العملة الأساسية: ' + curName(baseCur()) + " • 1 " + sym("SAR") + " = " + money(fxRate()) + " " + sym("YER") + "<br>" +
+        "📥 المقبوض: " + (curBreak(s.recBy).replace(" — ", "") || "—") + "<br>" +
+        "📤 المصروف: " + (curBreak(s.spentBy).replace(" — ", "") || "—") +
+        ((s.agreementCur !== baseCur()) ? "<br>💰 الاتفاقية: " + fmt(s.agreementRaw, s.agreementCur) + " (≈ " + fmtBase(s.agreement) + ")" : "") +
+        "</div>";
+    }
 
     if (s.deficit > 0) {
       html += '<div style="margin:12px 14px 0;background:#FEF2F2;border-radius:14px;padding:12px;box-shadow:inset 0 0 0 2px #FECACA">' +
         '<p style="margin:0;font-size:13px;font-weight:900;color:#991B1B">🚨 عجز مؤقت في الكاش</p>' +
-        '<p class="num" style="margin:2px 0 0;font-size:19px;font-weight:900;color:#B91C1C">' + money(s.deficit) + ' <span style="font-size:11px">ر.س</span></p>' +
-        '<span class="eq num" style="color:#991B1B;background:rgba(255,255,255,.8)">المصروفات ' + money(s.spent) + " − المقبوضات " + money(s.received) + " = العجز " + money(s.deficit) + "</span>" +
+        '<p class="num" style="margin:2px 0 0;font-size:19px;font-weight:900;color:#B91C1C">' + fmtBase(s.deficit) + "</p>" +
+        '<span class="eq num" style="color:#991B1B;background:rgba(255,255,255,.8)">المصروفات ' + fmtBase(s.spent) + " − المقبوضات " + fmtBase(s.received) + " = العجز " + fmtBase(s.deficit) + "</span>" +
         '<p style="margin:6px 0 0;font-size:11px;font-weight:700;color:#B91C1C">قيمة المشتريات تتجاوز المقبوضات، وتمت تغطية الفرق من جيب معلم الجبس كعهدة مؤقتة تُستقطع من الدفعة القادمة.</p></div>';
     }
 
@@ -758,9 +868,9 @@
     } else {
       html += '<table><thead><tr style="background:#ECFDF5;color:#065F46"><th>#</th><th>التاريخ</th><th>البيان</th><th style="text-align:left">المبلغ</th></tr></thead><tbody>';
       s.pays.forEach(function (x, i) {
-        html += '<tr><td class="num">' + (i + 1) + '</td><td class="num">' + shortDate(x.paidAt) + "</td><td>" + esc(x.note || "دفعة") + '</td><td class="num" style="text-align:left;font-weight:900;color:#047857">' + money(x.amount) + "</td></tr>";
+        html += '<tr><td class="num">' + (i + 1) + '</td><td class="num">' + shortDate(x.paidAt) + "</td><td>" + esc(x.note || "دفعة") + '</td><td class="num" style="text-align:left;font-weight:900;color:#047857">' + fmt(x.amount, x.currency) + "</td></tr>";
       });
-      html += '<tr class="tot-row" style="background:#ECFDF5;color:#065F46"><td colspan="3">الإجمالي</td><td class="num" style="text-align:left;border-top:1px solid #A7F3D0">' + money(s.received) + " ر.س</td></tr>";
+      html += '<tr class="tot-row" style="background:#ECFDF5;color:#065F46"><td colspan="3">الإجمالي</td><td class="num" style="text-align:left;border-top:1px solid #A7F3D0">' + fmtBase(s.received) + "</td></tr>";
       html += "</tbody></table>";
     }
     html += "</div>";
@@ -774,9 +884,9 @@
       s.exps.forEach(function (x, i) {
         var desc = esc(x.category) + (x.vendor ? " — " + esc(x.vendor) : "") + (x.description ? " (" + esc(x.description) + ")" : "");
         html += '<tr><td class="num">' + (i + 1) + '</td><td class="num">' + shortDate(x.spentAt) + "</td><td>" + desc + "</td>" +
-          '<td class="num" style="text-align:left;font-weight:900;color:#BE123C">' + money(x.amount) + "</td></tr>";
+          '<td class="num" style="text-align:left;font-weight:900;color:#BE123C">' + fmt(x.amount, x.currency) + "</td></tr>";
       });
-      html += '<tr class="tot-row" style="background:#FFF1F2;color:#9F1239"><td colspan="3">الإجمالي</td><td class="num" style="text-align:left;border-top:1px solid #FECDD3">' + money(s.spent) + " ر.س</td></tr>";
+      html += '<tr class="tot-row" style="background:#FFF1F2;color:#9F1239"><td colspan="3">الإجمالي</td><td class="num" style="text-align:left;border-top:1px solid #FECDD3">' + fmtBase(s.spent) + "</td></tr>";
       html += "</tbody></table>";
     }
     html += "</div>";
@@ -842,8 +952,15 @@
       '<label><span class="label">الجوال</span><input class="field num" id="f-phone" inputmode="tel" placeholder="05xxxxxxxx" value="' + esc(p.phone) + '"></label>' +
       "</div>" +
       '<label><span class="label">العنوان / الحي</span><input class="field" id="f-address" placeholder="مثال: الرياض — حي الياسمين" value="' + esc(p.address) + '"></label>' +
-      '<label><span class="label">💰 إجمالي قيمة الاتفاقية (ر.س)</span><input class="field num" id="f-total" type="number" min="0" inputmode="decimal" placeholder="0" style="text-align:center;font-size:19px;font-weight:900;border-color:#FCD34D;background:#FFFBEB;color:#92400E" value="' + esc(p.agreementTotal) + '">' +
-      '<span class="hint">المبلغ المتفق عليه كاملاً — وليس المبلغ المدفوع</span></label>';
+      '<label><span class="label">💰 إجمالي قيمة الاتفاقية</span>' +
+      '<div style="display:grid;grid-template-columns:1fr 100px;gap:8px">' +
+      '<input class="field num" id="f-total" type="number" min="0" inputmode="decimal" placeholder="0" style="text-align:center;font-size:19px;font-weight:900;border-color:#FCD34D;background:#FFFBEB;color:#92400E" value="' + esc(p.agreementTotal) + '">' +
+      '<select class="field" id="f-cur" style="font-size:11.5px;padding:10px 4px">' + curOptions(p.currency) + "</select>" +
+      "</div>" +
+      '<span class="hint">المبلغ المتفق عليه كاملاً — وليس المبلغ المدفوع • اختر عملة الاتفاق</span></label>' +
+      '<div style="background:#F8FAFC;border-radius:12px;padding:10px;font-size:11px;font-weight:800;color:#475569">' +
+      "💱 العملة الأساسية: <b>" + curName(baseCur()) + "</b> • سعر الصرف: <span class='num'>1 " + sym("SAR") + " = " + money(fxRate()) + " " + sym("YER") + "</span>" +
+      '<button type="button" data-act="open-currency" style="margin-top:6px;width:100%;background:#1E293B;color:#fff;border-radius:9px;padding:7px;font-family:inherit;font-size:11px;font-weight:900">⚙️ تعديل العملة وسعر الصرف</button></div>';
 
     if (!isEdit) {
       body += '<div style="background:#ECFDF5;border-radius:16px;padding:14px;box-shadow:inset 0 0 0 1px #A7F3D0">' +
@@ -882,7 +999,11 @@
       '<div style="background:' + (s.deficit > 0 ? "#FEF2F2" : "#ECFDF5") + ';border-radius:12px;padding:10px;text-align:center"><p style="margin:0;font-size:11px;font-weight:800;color:' + (s.deficit > 0 ? "#B91C1C" : "#047857") + '">' + (s.deficit > 0 ? "🚨 العجز الحالي" : "💵 الكاش باليد") + '</p><p class="num" style="margin:0;font-size:16px;font-weight:900;color:' + (s.deficit > 0 ? "#B91C1C" : "#047857") + '">' + money(Math.abs(s.cash)) + "</p></div>" +
       "</div>" +
       (s.deficit > 0 ? '<div class="notice warn">🚨 يوجد عجز حالي ' + money(s.deficit) + ' ر.س — هذه الدفعة ستُستخدم أولاً لتغطية العجز المدفوع من جيبك.</div>' : "") +
-      '<label><span class="label">المبلغ المقبوض (ر.س)</span><input class="field num" id="f-amount" type="number" min="0" inputmode="decimal" placeholder="0" style="text-align:center;font-size:23px;font-weight:900;border-color:#6EE7B7;background:#ECFDF5;color:#047857" value="' + esc(prefill || "") + '"></label>' +
+      '<label><span class="label">المبلغ المقبوض</span>' +
+      '<div style="display:grid;grid-template-columns:1fr 100px;gap:8px">' +
+      '<input class="field num" id="f-amount" type="number" min="0" inputmode="decimal" placeholder="0" style="text-align:center;font-size:23px;font-weight:900;border-color:#6EE7B7;background:#ECFDF5;color:#047857" value="' + esc(prefill || "") + '">' +
+      '<select class="field" id="f-cur" style="font-size:11.5px;padding:10px 4px">' + curOptions(baseCur()) + "</select>" +
+      "</div></label>" +
       '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:6px">' +
       [500, 1000, 2000, 5000].map(function (q) {
         return '<button type="button" data-act="add-quick" data-v="' + q + '" class="num" style="background:#ECFDF5;color:#047857;border-radius:11px;padding:9px 0;font-size:12px;font-weight:800">+' + q.toLocaleString("en-US") + "</button>";
@@ -914,7 +1035,11 @@
       '<p style="margin:0;font-size:11px;font-weight:900;color:' + (available < 0 ? "#B91C1C" : "#047857") + '">' + (available < 0 ? "🚨 عجز حالي — تدعم من جيبك" : "💵 الكاش المتاح لديك الآن") + "</p>" +
       '<p class="num" style="margin:2px 0 0;font-size:22px;font-weight:900;color:' + (available < 0 ? "#B91C1C" : "#047857") + '">' + money(Math.abs(available)) + ' <span style="font-size:12px">ر.س</span></p>' +
       '<p class="num" style="margin:2px 0 0;font-size:11px;font-weight:800;color:#64748B">المقبوض ' + money(s.received) + " − المصروف " + money(s.spent) + "</p></div>" +
-      '<label><span class="label">قيمة الفاتورة (ر.س)</span><input class="field num" id="f-amount" type="number" min="0" inputmode="decimal" placeholder="0" style="text-align:center;font-size:23px;font-weight:900;border-color:#FDA4AF;background:#FFF1F2;color:#BE123C"></label>' +
+      '<label><span class="label">قيمة الفاتورة</span>' +
+      '<div style="display:grid;grid-template-columns:1fr 100px;gap:8px">' +
+      '<input class="field num" id="f-amount" type="number" min="0" inputmode="decimal" placeholder="0" style="text-align:center;font-size:23px;font-weight:900;border-color:#FDA4AF;background:#FFF1F2;color:#BE123C">' +
+      '<select class="field" id="f-cur" style="font-size:11.5px;padding:10px 4px">' + curOptions(baseCur()) + "</select>" +
+      "</div></label>" +
       '<div id="exp-live"></div>' +
       '<div class="grid2">' +
       '<label><span class="label">التاريخ</span><input class="field num" id="f-date" type="date" value="' + todayInput() + '"></label>' +
@@ -942,14 +1067,16 @@
       var s = summary(tmp.pid);
       var amt = Number(input.value) || 0;
       if (amt <= 0) { live.innerHTML = ""; return; }
-      var newRemaining = s.remaining - amt;
-      var newCash = s.cash + amt;
+      var curP = document.getElementById("f-cur");
+      var amtBase = toBase(amt, curP ? curP.value : baseCur());
+      var newRemaining = s.remaining - amtBase;
+      var newCash = s.cash + amtBase;
       var html = '<div style="background:#F8FAFC;border-radius:12px;padding:11px">' +
         '<p style="margin:0 0 6px;font-size:11px;font-weight:900;color:#64748B">بعد تسجيل هذه الدفعة:</p>' +
         '<div style="display:flex;justify-content:space-between;font-size:12px;font-weight:900"><span style="color:#475569">المتبقي على صاحب البيت</span>' +
-        '<span class="num" style="color:' + (newRemaining < 0 ? "#DC2626" : "#92400E") + '">' + money(newRemaining) + " ر.س</span></div>" +
+        '<span class="num" style="color:' + (newRemaining < 0 ? "#DC2626" : "#92400E") + '">' + fmtBase(newRemaining) + "</span></div>" +
         '<div style="display:flex;justify-content:space-between;font-size:12px;font-weight:900;margin-top:4px"><span style="color:#475569">الكاش باليد</span>' +
-        '<span class="num" style="color:' + (newCash < 0 ? "#DC2626" : "#047857") + '">' + money(newCash) + " ر.س</span></div>";
+        '<span class="num" style="color:' + (newCash < 0 ? "#DC2626" : "#047857") + '">' + fmtBase(newCash) + "</span></div>" + (curP && curP.value !== baseCur() ? '<div style="font-size:10.5px;font-weight:800;color:#64748B;margin-top:3px">' + fmt(amt, curP.value) + " ≈ " + fmtBase(amtBase) + "</div>" : "") + "";
       if (s.deficit > 0 && newCash >= 0) {
         html += '<p style="margin:8px 0 0;background:#D1FAE5;color:#065F46;border-radius:8px;padding:6px 8px;font-size:11px;font-weight:900">✅ ستنتهي حالة العجز نهائياً بعد هذه الدفعة</p>';
       } else if (s.deficit > 0) {
@@ -974,18 +1101,20 @@
       var s = summary(tmp.pid);
       var amt = Number(input.value) || 0;
       if (amt <= 0) { live.innerHTML = ""; return; }
-      var after = s.cash - amt;
+      var curEl = document.getElementById("f-cur");
+      var amtBase = toBase(amt, curEl ? curEl.value : baseCur());
+      var after = s.cash - amtBase;
       var deficit = after < 0 ? Math.abs(after) : 0;
       if (deficit > 0) {
         live.innerHTML = '<div class="notice danger">🚨 تنبيه عجز: ' + money(deficit) + ' ر.س' +
-          '<span class="eq num">العجز = المصروفات بعد الفاتورة − المقبوضات = ' + money(s.spent + amt) + " − " + money(s.received) + " = " + money(deficit) + "</span>" +
-          "ستدفع الفرق <b>" + money(deficit) + " ر.س</b> من جيبك حتى تستلم الدفعة القادمة." +
+          '<span class="eq num">العجز = المصروفات بعد الفاتورة − المقبوضات = ' + fmtBase(s.spent + amtBase) + " − " + fmtBase(s.received) + " = " + fmtBase(deficit) + "</span>" +
+          "ستدفع الفرق <b>" + fmtBase(deficit) + "</b> من جيبك حتى تستلم الدفعة القادمة." +
           (s.received === 0 ? '<span style="display:block;margin-top:4px;font-weight:900">ملاحظة: لم تُسجَّل أي دفعة مقبوضة لهذا المشروع بعد — إن سبق أن استلمت مبلغاً فسجّله كدفعة ليصح الحساب.</span>' : "") +
           '<label style="display:flex;align-items:center;gap:8px;margin-top:8px;background:#fff;border-radius:9px;padding:8px;font-size:12px;font-weight:900;color:#B91C1C"><input type="checkbox" id="ack-exp" style="width:16px;height:16px;accent-color:#DC2626"> أفهم العجز وأريد تسجيل الفاتورة</label></div>';
         var btn = document.getElementById("save-exp");
         if (btn) btn.textContent = "تسجيل الفاتورة مع العجز ⚠️";
       } else {
-        live.innerHTML = '<div class="notice ok">✅ الكاش يكفي — سيتبقى ' + money(after) + " ر.س بعد هذه الفاتورة</div>";
+        live.innerHTML = '<div class="notice ok">✅ الكاش يكفي — سيتبقى ' + fmtBase(after) + " بعد هذه الفاتورة" + (curEl && curEl.value !== baseCur() ? '<span class="eq num">' + fmt(amt, curEl.value) + " ≈ " + fmtBase(amtBase) + "</span>" : "") + "</div>";
         var btn2 = document.getElementById("save-exp");
         if (btn2) btn2.textContent = "حفظ الفاتورة ✓";
       }
@@ -1000,7 +1129,12 @@
       [["مشاريع", db.projects.length, "#1E293B"], ["دفعات", db.payments.length, "#059669"], ["فواتير", db.expenses.length, "#BE123C"]].map(function (x) {
         return '<div class="stat" style="text-align:center"><p class="num" style="margin:0;font-size:20px;font-weight:900;color:' + x[2] + '">' + x[1] + '</p><p style="margin:0;font-size:11px;font-weight:800;color:#94A3B8">' + x[0] + "</p></div>";
       }).join("") + "</div>" +
-      '<div class="notice ok">🇸🇦 نسخة مستقلة (ملف واحد). البيانات محفوظة داخل هذا الجوال — لا تحتاج إنترنت ولا استضافة.</div>' +
+      '<div style="background:#0F172A;color:#fff;border-radius:14px;padding:12px">' +
+      '<p style="margin:0;font-size:12.5px;font-weight:900">💱 العملة وسعر الصرف</p>' +
+      '<p class="num" style="margin:4px 0 0;font-size:11px;font-weight:800;color:#CBD5E1">الأساسية: ' + curName(baseCur()) + " • 1 " + sym("SAR") + " = " + money(fxRate()) + " " + sym("YER") + "</p>" +
+      '<button data-act="open-currency" style="margin-top:8px;width:100%;background:#D97706;color:#fff;border-radius:10px;padding:10px;font-family:inherit;font-size:12px;font-weight:900">⚙️ تعديل العملة وسعر الصرف</button>' +
+      "</div>" +
+      '<div class="notice ok">📴 نسخة مستقلة (ملف واحد). البيانات محفوظة داخل هذا الجوال — لا تحتاج إنترنت ولا استضافة.</div>' +
       '<div class="card" style="padding:14px">' +
       '<p style="margin:0;font-size:14px;font-weight:900">💾 النسخ الاحتياطي</p>' +
       '<p style="margin:2px 0 0;font-size:11px;font-weight:700;color:#64748B">صدّر البيانات كملف لنقلها لجوال آخر أو حفظها.</p>' +
@@ -1051,6 +1185,44 @@
     document.body.appendChild(d);
   }
 
+  /* ───────── إعدادات العملة وسعر الصرف ───────── */
+  function currencyModal() {
+    var st = settings();
+    var body = '<div style="display:grid;gap:12px">' +
+      '<div class="notice warn">💱 العملة الأساسية هي عملة التقارير والملخص. أي مبلغ بعملة أخرى يُحوَّل إليها تلقائياً بسعر الصرف الذي تحدده.</div>' +
+      '<label><span class="label">العملة الأساسية</span><select class="field" id="c-base" style="font-size:13px;padding:12px">' + curOptions(st.base) + "</select></label>" +
+      '<label><span class="label">سعر الصرف</span>' +
+      '<div style="display:flex;align-items:center;gap:8px;background:#F8FAFC;border-radius:14px;padding:10px 12px">' +
+      '<span style="font-size:12px;font-weight:900;color:#334155;white-space:nowrap">1 ' + sym("SAR") + " =</span>" +
+      '<input class="field num" id="c-rate" type="number" min="0" step="0.01" inputmode="decimal" value="' + esc(st.rate) + '" style="text-align:center;font-size:17px;font-weight:900;padding:8px">' +
+      '<span style="font-size:12px;font-weight:900;color:#334155;white-space:nowrap">' + sym("YER") + "</span>" +
+      "</div>" +
+      '<span class="hint">حدّثه كلما تغيّر السعر في السوق. مثال: 150 يعني 1 سعودي = 150 يمني.</span></label>' +
+      '<div id="c-preview" style="background:#1E293B;color:#fff;border-radius:14px;padding:12px;font-size:11.5px;font-weight:800;text-align:center">—</div>' +
+      '<div class="grid2">' +
+      '<button data-act="save-currency" style="background:#D97706;color:#fff;border-radius:14px;padding:13px;font-size:13px;font-weight:900">✓ حفظ الإعدادات</button>' +
+      '<button data-act="close-modal" style="background:#F1F5F9;color:#334155;border-radius:14px;padding:13px;font-size:13px;font-weight:800">إلغاء</button>' +
+      "</div></div>";
+    sheet("💱 العملة وسعر الصرف", "حدد عملة التقارير وسعر التحويل", body);
+
+    function preview() {
+      var b = (document.getElementById("c-base") || {}).value || "SAR";
+      var r = Number((document.getElementById("c-rate") || {}).value) || 0;
+      var el = document.getElementById("c-preview");
+      if (!el) return;
+      if (r <= 0) { el.textContent = "أدخل سعر صرف صحيحاً"; return; }
+      var sarToYer = b === "SAR" ? r : 1 / r;
+      el.innerHTML = "العملة الأساسية: " + curName(b) + "<br>1 " + sym("SAR") + " = " + money(sarToYer) + " " + sym("YER") +
+        '<br><span style="color:#FCD34D">مثال: 1,000 ' + sym("YER") + " = " + money(b === "SAR" ? 1000 / r : 1000) + " " + sym("SAR") + "</span>";
+    }
+    ["c-base", "c-rate"].forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el) el.addEventListener("input", preview);
+      if (el) el.addEventListener("change", preview);
+    });
+    preview();
+  }
+
   /* ───────── فاتورة أجرة عمال ───────── */
   function laborModal(pid) {
     var s = summary(pid);
@@ -1069,10 +1241,14 @@
       '<label><span class="label">خصم / سلفة</span><input class="field num" id="l-ded" type="number" min="0" inputmode="decimal" placeholder="0" style="text-align:center"></label>' +
       '<label><span class="label">التاريخ</span><input class="field num" id="l-date" type="date" value="' + todayInput() + '"></label>' +
       "</div>" +
+      '<label><span class="label">عملة الأجرة (عادةً الريال اليمني)</span>' +
+      '<select class="field" id="l-cur" style="font-size:12px;padding:10px 8px">' + curOptions(baseCur() === "SAR" ? "YER" : "SAR").replace('selected', '') .replace('<option value="' + (baseCur() === "SAR" ? "YER" : "SAR") + '"', '<option value="' + (baseCur() === "SAR" ? "YER" : "SAR") + '" selected') + "</select>" +
+      '<span class="hint">يُحوَّل تلقائياً للعملة الأساسية <b>' + curName(baseCur()) + '</b> بسعر <span class="num">1 ' + sym("SAR") + " = " + money(fxRate()) + " " + sym("YER") + '</span></span></label>' +
       '<div style="background:#1E293B;color:#fff;border-radius:14px;padding:14px;text-align:center">' +
       '<p style="margin:0;font-size:11px;font-weight:800;color:#CBD5E1">إجمالي الأجرة المستحقة</p>' +
       '<p class="num" id="l-total" style="margin:2px 0 0;font-size:28px;font-weight:900">0 <span style="font-size:12px">ر.س</span></p>' +
-      '<p class="num" id="l-eq" style="margin:2px 0 0;font-size:11px;font-weight:700;color:#94A3B8">—</p></div>' +
+      '<p class="num" id="l-eq" style="margin:2px 0 0;font-size:11px;font-weight:700;color:#94A3B8">—</p>' +
+      '<p class="num" id="l-base" style="margin:4px 0 0;font-size:11px;font-weight:800;color:#FCD34D">—</p></div>' +
       '<div id="l-alert"></div>' +
       '<label><span class="label">ملاحظة</span><input class="field" id="l-note" placeholder="مثال: تركيب جبس المجلس"></label>' +
       '<div><span class="label">📷 صورة إيصال الأجرة <span style="color:#94A3B8;font-weight:600">(اختياري)</span></span>' + imageBlock(null, "التقط صورة الإيصال") + "</div>" +
@@ -1198,8 +1374,10 @@
         errBox2.innerHTML = '<p style="margin:0;background:#FEF2F2;color:#B91C1C;border-radius:12px;padding:10px;text-align:center;font-size:13px;font-weight:800">فضلاً أدخل عدد الأيام والأجرة اليومية</p>';
         return;
       }
+      var laborCur = (document.getElementById("l-cur") || {}).value || baseCur();
+      var totalBase = toBase(total, laborCur);
       var sumL = summary(tmp.pid);
-      if (total > sumL.cash) {
+      if (totalBase > sumL.cash) {
         var ackL = document.getElementById("l-ack");
         if (!ackL || !ackL.checked) {
           errBox2.innerHTML = '<p style="margin:0;background:#FEF2F2;color:#B91C1C;border-radius:12px;padding:10px;text-align:center;font-size:13px;font-weight:800">أجرة العمال تُحدث عجزاً — يرجى تأكيد التنبيه أولاً</p>';
@@ -1212,6 +1390,7 @@
       if (note) parts.push(note);
       db.expenses.unshift({
         id: uid(), projectId: tmp.pid, amount: total,
+        currency: laborCur,
         spentAt: new Date(dateStr + "T12:00:00").toISOString(),
         category: "أجور عمال", vendor: worker, description: parts.join(" • "),
         image: tmp.image
@@ -1266,6 +1445,7 @@
         if (pr) {
           pr.title = title.trim(); pr.clientName = client.trim(); pr.phone = phone.trim();
           pr.address = address.trim(); pr.agreementTotal = totalVal; pr.notes = notes.trim();
+          pr.currency = (document.getElementById("f-cur") || {}).value || pr.currency || baseCur();
           pr.status = tmp.status || pr.status;
         }
         save(); closeModal(); render(); return;
@@ -1275,6 +1455,7 @@
       db.projects.unshift({
         id: pid, title: title.trim(), clientName: client.trim(), phone: phone.trim(),
         address: address.trim(), agreementTotal: totalVal, notes: notes.trim(),
+        currency: (document.getElementById("f-cur") || {}).value || baseCur(),
         status: "active", createdAt: new Date().toISOString()
       });
       var downVal = Number((document.getElementById("f-down") || {}).value) || 0;
@@ -1305,6 +1486,7 @@
       }
       db.payments.unshift({
         id: uid(), projectId: tmp.pid, amount: amount,
+        currency: (document.getElementById("f-cur") || {}).value || baseCur(),
         paidAt: new Date(dateV + "T12:00:00").toISOString(),
         method: method, note: note.trim(), image: tmp.image
       });
@@ -1320,7 +1502,7 @@
       var err2 = document.getElementById("form-err");
       if (amt <= 0) { err2.innerHTML = '<p style="margin:0;background:#FEF2F2;color:#B91C1C;border-radius:12px;padding:10px;text-align:center;font-size:13px;font-weight:800">فضلاً أدخل قيمة الفاتورة</p>'; return; }
       var s2 = summary(tmp.pid);
-      if (amt > s2.cash) {
+      if (toBase(amt, (document.getElementById("f-cur") || {}).value || baseCur()) > s2.cash) {
         var ack2 = document.getElementById("ack-exp");
         if (!ack2 || !ack2.checked) {
           err2.innerHTML = '<p style="margin:0;background:#FEF2F2;color:#B91C1C;border-radius:12px;padding:10px;text-align:center;font-size:13px;font-weight:800">هذه الفاتورة تُحدث عجزاً — يرجى تأكيد التنبيه أولاً</p>';
@@ -1329,6 +1511,7 @@
       }
       db.expenses.unshift({
         id: uid(), projectId: tmp.pid, amount: amt,
+        currency: (document.getElementById("f-cur") || {}).value || baseCur(),
         spentAt: new Date(dV + "T12:00:00").toISOString(),
         category: cat, vendor: vendor.trim(), description: desc.trim(), image: tmp.image
       });
@@ -1363,6 +1546,18 @@
         w2.innerHTML = imageBlock(null, "التقط الصورة");
         holder2.replaceWith(w2.firstChild);
       }
+      return;
+    }
+
+    if (act === "open-currency") return currencyModal();
+    if (act === "save-currency") {
+      var nb = (document.getElementById("c-base") || {}).value || "SAR";
+      var nr = Number((document.getElementById("c-rate") || {}).value) || 0;
+      if (nr <= 0) { alert("أدخل سعر صرف أكبر من صفر"); return; }
+      settings().base = nb;
+      settings().rate = nr;
+      save(); closeModal(); render();
+      setTimeout(function () { toastMsg("تم حفظ إعدادات العملة ✓", true); }, 120);
       return;
     }
 
